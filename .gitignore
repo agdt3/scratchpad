@@ -1,4 +1,4 @@
 **/VulkanTesting/shaders/**.spv
 
-**/clang/semaphore/**
-!**/clang/semaphore/*.*
+**/clang/semaphores/**
+!**/clang/semaphores/*.*
