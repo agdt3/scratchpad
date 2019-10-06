@@ -2,3 +2,5 @@
 
 **/clang/semaphores/**
 !**/clang/semaphores/*.*
+
+**/py/crypto/**.pyc
