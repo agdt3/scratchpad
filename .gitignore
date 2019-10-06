@@ -7,3 +7,7 @@
 
 **/py/crypto/**.pyc
 **/py/pygame/**.pyc
+
+**/elixir/**.beam
+**/elixir/kv/_build/**
+**/elixir/kv_umbrella/_build/**
