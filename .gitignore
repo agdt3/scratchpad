@@ -1,4 +1,6 @@
-**/VulkanTesting/shaders/**.spv
+**/cpp/VulkanTesting/shaders/**.spv
+**/cpp/data_structures/**
+!**/cpp/data_structures/*.*
 
 **/clang/semaphores/**
 !**/clang/semaphores/*.*
