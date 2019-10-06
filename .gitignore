@@ -4,3 +4,4 @@
 !**/clang/semaphores/*.*
 
 **/py/crypto/**.pyc
+**/py/pygame/**.pyc
