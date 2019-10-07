@@ -1,0 +1,98 @@
+call plug#begin('~/.vim/plugged')
+" Git gutter
+Plug 'airblade/vim-gitgutter'
+
+" Linter integration
+" Plug 'w0rp/ale'
+
+" Vim DB integration - lazyloading
+Plug 'tpope/vim-dadbod', { 'on': 'DB' }
+
+" Fuzzy search
+Plug 'junegunn/fzf', { 'dir': '~/.fzf', 'do': './install --bin' }
+Plug 'junegunn/fzf.vim'
+
+" NerdTree - lazyloading
+Plug 'scrooloose/nerdtree', { 'on':  'NERDTreeToggle' }
+
+" Fastfold
+Plug 'Konfekt/FastFold'
+
+" PythonFold
+Plug 'tmhedberg/SimpylFold'
+
+call plug#end()
+
+" Vim fast updatetime required by gitgutter plugin
+set updatetime=100
+
+" General
+" show existing tab with 2 spaces width
+set tabstop=2
+" when indenting with '>', use 2 spaces width
+set shiftwidth=2
+" On pressing tab, insert 2 spaces
+set expandtab
+set softtabstop=2
+
+" Line numbers
+set number
+set ruler
+set laststatus=2
+
+" Column line
+set colorcolumn=79
+
+" Remap jj to Esp
+imap jj <Esc>
+
+" Disable Arrow keys in Escape mode
+map <up> <nop>
+map <down> <nop>
+map <left> <nop>
+map <right> <nop>
+
+" Disable Arrow keys in Insert mode
+imap <up> <nop>
+imap <down> <nop>
+imap <left> <nop>
+imap <right> <nop>
+
+" Syntax highlighting
+set t_Co=256
+syntax enable
+set background=dark
+let g:solarized_termtrans = 1
+let g:solarized_termcolors=256
+colorscheme solarized
+
+" Whitespace detection and removal
+highlight ExtraWhitespace ctermbg=red guibg=red
+match ExtraWhitespace /\s\+$/
+autocmd BufWinEnter * match ExtraWhitespace /\s\+$/
+autocmd InsertEnter * match ExtraWhitespace /\s\+\%#\@<!$/
+autocmd InsertLeave * match ExtraWhitespace /\s\+$/
+autocmd BufWinLeave * call clearmatches()
+
+" NerdTree config
+" Open ntree on Ctrl-n
+map <C-n> :NERDTreeToggle<CR>
+" Open ntree when a directory is opened
+autocmd StdinReadPre * let s:std_in=1
+autocmd VimEnter * if argc() == 1 && isdirectory(argv()[0]) && !exists("s:std_in") | exe 'NERDTree' argv()[0] | wincmd p | ene | endif
+
+" /*FzF search config
+" Open fzf search with ; key
+map ' :Files<CR>
+" FzF search config*/
+
+let g:some_db = 'db_connection_string'
+
+" Php Folding (no longer needed)
+"let php_folding = 1        "Set PHP folding of classes and functions.
+"let php_htmlInStrings = 1  "Syntax highlight HTML code inside PHP strings.
+"let php_sql_query = 1      "Syntax highlight SQL code inside PHP strings.
+"let php_noShortTags = 1    "Disable PHP short tags.
+
+" SimplyFold Config
+let g:SimpylFold_fold_docstring = 0
