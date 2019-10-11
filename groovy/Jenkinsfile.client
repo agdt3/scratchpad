@@ -1,0 +1,240 @@
+pipeline {
+  agent {
+    docker {
+      image "node:10-alpine"
+    }
+  }
+
+  parameters {
+    string(
+      name: 'version_tag',
+      description: 'Docker tag of the accounts image to deploy.',
+      defaultValue: ''
+    )
+  }
+
+  environment {
+    CI = 'true'
+
+    NPM_TOKEN = credentials('npm_token')
+    NETLIFY_AUTH_TOKEN = credentials("accounts-app-netlify-auth-token")
+
+    DEV_NETLIFY_SITE_ID = "9fb386b2-23a5-4bbe-9452-b0dd7c99ccc8"
+
+    STAGING_STORAGE_CREDENTIALS_ID = '200c8256-e2d8-4e21-8bcb-fa5c6f7c40ae'
+    STAGING_CONTAINER_NAME = '$web'
+
+    STAGING_NETLIFY_SITE_ID = "9b04c09f-b489-483d-8396-0c500c163a5a"
+
+    PRODUCTION_STORAGE_CREDENTIALS_ID = '3932ad53-a4bf-40b9-9a9c-36175795fc61'
+    // PRODUCTION_CONTAINER_NAME = '$web'
+    PRODUCTION_CONTAINER_NAME = 'test-develop'
+  }
+
+  stages {
+    stage("Env Vars") {
+      steps {
+        sh "ls -laht"
+        sh "printenv"
+        sh "mkdir -p client/build/"
+        script {
+          if (BRANCH_NAME == 'develop' || (BRANCH_NAME ==~ /test\/(.*)/)) {
+            env.TARGET = 'dev';
+          } else if (BRANCH_NAME == 'master') {
+            env.TARGET = 'production';
+          } else if (BRANCH_NAME ==~ /(bugfix|release)\/(.*)/) {
+            env.TARGET = 'staging';
+          } else {
+            // no-op
+            env.TARGET = 'none';
+          }
+
+          // Set version_tag if required
+          if (version_tag == '') {
+            escapedBranchName = "${GIT_BRANCH}".replaceAll("/", "-");
+            env.version_tag = "${escapedBranchName}-${GIT_COMMIT}";
+          }
+
+          // Set deploy-specific config
+          if (TARGET == 'dev') {
+            env.NETLIFY_SITE_ID = DEV_NETLIFY_SITE_ID
+          } else if (TARGET == 'staging') {
+            env.STORAGE_CREDENTIALS_ID = STAGING_STORAGE_CREDENTIALS_ID
+            env.CONTAINER_NAME = STAGING_CONTAINER_NAME
+            env.NETLIFY_SITE_ID = STAGING_NETLIFY_SITE_ID
+          } else if (TARGET == 'production') {
+            env.STORAGE_CREDENTIALS_ID = PRODUCTION_STORAGE_CREDENTIALS_ID
+            env.CONTAINER_NAME = PRODUCTION_CONTAINER_NAME
+          }
+        }
+        sh "printenv"
+      }
+    }
+
+    stage("Test and Build Client") {
+      when {
+        expression {
+          TARGET == 'dev' ||
+          TARGET == 'staging'
+        }
+      }
+      environment {
+        REACT_APP_VERSION = "${version_tag}"
+      }
+      steps {
+        echo "Test and build client in ${TARGET}"
+        // Add apk packages and build
+        dir("client/") {
+          sh "yarn install"
+          sh "./jenkins/test.sh"
+          sh "./jenkins/build-client.sh"
+          sh "ls -laht build/"
+        }
+      }
+    }
+
+    stage("Download and untar Staging Client tar ball in Production") {
+      when {
+        expression {
+          TARGET == 'production'
+        }
+      }
+      steps {
+        echo "Download and untar staging client tar ball in ${TARGET}"
+        sh "mkdir -p /tmp/new"
+        azureDownload storageCredentialId: "${STAGING_STORAGE_CREDENTIALS_ID}",
+          downloadType: "container",
+          containerName: 'backup',
+          includeFilesPattern: "${version_tag}.tar.gz",
+          downloadDirLoc: "/tmp/new"
+
+        // Untar tarball in build
+        dir("client/build/") {
+          sh "rm -rf ./*"
+          sh "cp /tmp/new/${version_tag}.tar.gz ./${version_tag}.tar.gz"
+          sh "tar -zxvf ${version_tag}.tar.gz"
+          sh "ls -laht"
+          sh "rm ${version_tag}.tar.gz"
+        }
+      }
+    }
+
+    stage("Create and Upload Client tar ball in Dev/Staging") {
+      when {
+        expression {
+          TARGET == 'staging'
+        }
+      }
+      steps {
+        echo "Creating and uploading tarball to ${TARGET}"
+        dir("client/build/") {
+          sh "ls -laht"
+          sh "tar -czvf ${version_tag}.tar.gz ./*"
+
+          azureUpload storageCredentialId: "${STORAGE_CREDENTIALS_ID}",
+            storageType: "blobstorage",
+            containerName: 'backup',
+            filesPath: "${version_tag}.tar.gz",
+            blobProperties: [detectContentType: true],
+            pubAccessible: true
+
+          sh "rm ${version_tag}.tar.gz"
+        }
+      }
+    }
+
+    stage("Upload Client and Shopify script to Netlify") {
+      when {
+        expression {
+          TARGET == 'dev' ||
+          TARGET == 'staging'
+        }
+      }
+      steps {
+        echo "Copy shopify script"
+        sh "mkdir client/build/shopify/"
+        sh "cp shopify/shopify.js client/build/shopify/shopify.js"
+
+        echo "Push build folder to netlify"
+        dir("client/") {
+          sh "cp ./netlify/_redirects ./build/_redirects"
+          sh "cp ./netlify/_headers ./build/_headers"
+          sh "./netlify/deploy.prod.sh"
+        }
+      }
+    }
+
+    stage("Upload Client") {
+      when {
+        expression {
+          TARGET == 'staging' ||
+          TARGET == 'production'
+        }
+      }
+      steps {
+        echo "Uploading client to ${TARGET}"
+        // Delete current content
+        sh "mkdir -p /tmp/old"
+        azureDownload storageCredentialId: "${STORAGE_CREDENTIALS_ID}",
+          downloadType: "container",
+          containerName: "${CONTAINER_NAME}",
+          includeFilesPattern: "**/**",
+          downloadDirLoc: "/tmp/old",
+          deleteFromAzureAfterDownload: true
+
+        dir("client/build/") {
+          azureUpload storageCredentialId: "${STORAGE_CREDENTIALS_ID}",
+            storageType: "blobstorage",
+            containerName: "${CONTAINER_NAME}",
+            filesPath: "**/**",
+            blobProperties: [detectContentType: true],
+            pubAccessible: true
+        }
+      }
+    }
+
+    stage("Upload shopify script") {
+      when {
+        expression {
+          TARGET == 'staging' ||
+          TARGET == 'production'
+        }
+      }
+      steps {
+        script {
+          echo "Uploading shopify script to ${TARGET}"
+          dir("shopify/") {
+            azureUpload storageCredentialId: "${STORAGE_CREDENTIALS_ID}",
+              storageType: "blobstorage",
+              containerName: "${CONTAINER_NAME}",
+              filesPath: "shopify.js",
+              blobProperties: [contentType: "application/javascript"],
+              pubAccessible: true
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      office365ConnectorSend(
+        message: "Accounts App Client launched successfully",
+        status: "SUCCESS",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "6ef449"
+      )
+    }
+    failure {
+      office365ConnectorSend(
+        message: "Error while launching Accounts App Client",
+        status: "FAILURE",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "d10815"
+      )
+    }
+    always {
+      deleteDir()
+    }
+  }
+}

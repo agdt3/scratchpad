@@ -1,0 +1,148 @@
+pipeline {
+  agent {
+    node {
+      label 'master'
+      customWorkspace "${env.HOME}/.jenkins/:/tmp"
+    }
+  }
+
+  parameters {
+    choice(
+      choices: ["None", "Patch", "Minor", "Major"],
+      description: "Version to upgrade",
+      name: "versionPart"
+    )
+  }
+
+  environment {
+    BASE_VERSION = "v0.0.0"
+    GITHUB_CREDS = credentials('we-infra-github-account')
+    GITHUB_WETL_CORE_URL = "https://${GITHUB_CREDS_USR}:${GITHUB_CREDS_PSW}@github.com/freethechildren/platform-wetl-core.git"
+    DOCKER_REGISTRY_HOST = 'wedockerregistrystaging.azurecr.io'
+    DOCKER_REGISTRY_CREDS_ID = 'we-docker-registry-staging'
+  }
+
+  stages {
+    stage('Version check and setup') {
+      steps {
+        script {
+
+          sh "git remote set-url origin $GITHUB_WETL_CORE_URL"
+          sh "git fetch --tags"
+          env.currentVersion = sh(
+            script: "git tag --sort=-version:refname | head -n 1",
+            returnStdout: true
+          ).trim()
+          if (env.currentVersion.isEmpty()) { env.currentVersion = "$BASE_VERSION" }
+          echo "The latest git release is: $env.currentVersion"
+
+          if (params.versionPart == 'None') {
+            echo "Re-releasing this version, skipping tag stage."
+          }
+        }
+      }
+    }
+    stage('Push a new version tag') {
+      when {expression{params.versionPart != 'None'}}
+      steps {
+        echo "${params.versionPart} version part selected, incrementing version from ${env.currentVersion}"
+        script {
+          def versionList = env.currentVersion.substring(1,).split("\\.")
+
+          if (versionList.size() != 3) {
+            error "Version string format is broken"
+          }
+
+          def versionPartMap = [
+            'Major': 0,
+            'Minor': 1,
+            'Patch': 2
+          ]
+
+          def index = versionPartMap.get(params.versionPart)
+
+          // Increment relevant version part
+          versionList[index] = ((versionList[index] as Integer) + 1) as String
+
+          // Reset all lower version parts back to "0"
+          for (i = index + 1; i < versionList.size(); i++) {
+            versionList[i] = "0"
+          }
+
+          env.currentVersion = "v" + versionList.join(".")
+        }
+
+        echo "The new release version is: ${env.currentVersion}. Pushing to github"
+
+        sh "git tag ${env.currentVersion} -m \"Release ${env.currentVersion}\""
+        sh "git show ${env.currentVersion}"
+        sh "git push origin --tags"
+      }
+    }
+    stage('Push image') {
+      steps {
+        script {
+          docker.withRegistry("https://${DOCKER_REGISTRY_HOST}", "${DOCKER_REGISTRY_CREDS_ID}") {
+            def img = docker.build("wetl-core/worker", '-f Dockerfile.production .')
+            img.push("${env.currentVersion}")
+            img.push("latest")
+          }
+        }
+      }
+    }
+    stage('Kick off Staging deploy') {
+      steps {
+        build (
+          job: 'wetl-core-deploy-2',
+          parameters: [
+            [$class: 'StringParameterValue', name: 'target', value: "staging"],
+            [$class: 'StringParameterValue', name: 'image_tag', value: "${env.currentVersion}"]
+          ],
+          wait: true,
+          propagate: true
+        )
+      }
+    }
+    stage('Run Smoke Tests') {
+      steps {
+        echo "TBD!"
+      }
+    }
+    stage('Kick off Production deploy') {
+      steps {
+        build (
+          job: 'wetl-core-deploy-2',
+          parameters: [
+            [$class: 'StringParameterValue', name: 'target', value: "production"],
+            [$class: 'StringParameterValue', name: 'image_tag', value: "${env.currentVersion}"]
+          ],
+          wait: true,
+          propagate: true
+        )
+      }
+    }
+  }
+
+  post {
+    success {
+      office365ConnectorSend(
+        message: "WETL Core Release ${env.currentVersion} tagged and pushed successfully",
+        status: "SUCCESS",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "6ef449"
+      )
+    }
+    failure {
+      office365ConnectorSend(
+        message: "Error while releasing ${env.currentVersion} of WETL Core.",
+        status: "FAILURE",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "d10815"
+      )
+    }
+    always {
+      echo 'Cleaning up'
+      deleteDir()
+    }
+  }
+}

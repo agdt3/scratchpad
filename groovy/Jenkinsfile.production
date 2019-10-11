@@ -1,0 +1,66 @@
+pipeline {
+  agent any
+
+  parameters {
+    string(
+      name: 'version_tag',
+      description: 'Docker tag on the accounts image to deploy.',
+      defaultValue: ""
+    )
+  }
+
+  environment {
+    target = "production"
+  }
+
+  stages {
+    stage("Env Vars and Setup") {
+      steps {
+        sh "printenv"
+        echo "Launching ${version_tag} to ${target}"
+      }
+    }
+    stage("Kick off Client Job") {
+      when {
+        expression {
+          version_tag != ""
+        }
+      }
+      steps {
+        build (
+          job: 'accounts-app-client',
+          parameters: [
+            string(name: 'version_tag', value: "$version_tag"),
+            string(name: 'target', value: "$target")
+          ],
+          wait: false,
+          propagate: false
+        )
+      }
+    }
+    stage("Kick off BFF Job") {
+      when {
+        expression {
+          version_tag != ""
+        }
+      }
+      steps {
+        build (
+          job: 'accounts-app-bff',
+          parameters: [
+            string(name: 'version_tag', value: "$version_tag"),
+            string(name: 'target', value: "$target")
+          ],
+          wait: false,
+          propagate: false
+        )
+      }
+    }
+  }
+
+  post {
+    always {
+      deleteDir()
+    }
+  }
+}

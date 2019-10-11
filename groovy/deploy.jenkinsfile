@@ -1,0 +1,183 @@
+pipeline {
+  agent {
+    node {
+      label 'master'
+      customWorkspace "${env.HOME}/.jenkins/:/tmp"
+    }
+  }
+  parameters {
+    choice(
+      name: 'target',
+      description: 'Which deploy (dev, staging, production) to deploy to',
+      choices: ['dev', 'staging', 'production'],
+    )
+    string(
+      name: 'image_tag',
+      description: 'Docker tag on the wetl-core image to deploy.  Either version string or build tag',
+      defaultValue: 'latest'
+    )
+  }
+
+  environment {
+    DOCKER_REGISTRY = 'wedockerregistrystaging.azurecr.io'
+    DOCKER_REGISTRY_NAME = 'WeDockerRegistryStaging'
+    DOCKER_REGISTRY_CREDS = credentials('we-docker-registry-staging')
+    DOCKER_REPO_NAME='wetl-core/worker'
+    JENKINS_SP_PW = credentials('jenkins_sp_pw')
+    JENKINS_SP_NAME = 'jenkins_sp'
+    APP_NAME = "wetl-core-${params.target}"
+    MQ_BROKER = 'redis'
+    DNS_NAME_LABEL = "wetl-core-worker-${params.target}"
+    APPINSIGHTS_KEY = credentials("wetl-azure-insights-key-${params.target}")
+  }
+  stages {
+    stage('Info and setup') {
+      steps {
+        // Prints out helpful diagnostics on the build environment
+        sh 'printenv'
+        sh 'ls -la'
+        sh 'pwd'
+
+        script {
+          // Set deploy-specific config
+          if (params.target == 'dev') {
+            env.RESOURCE_GROUP = 'weorg-dev'
+            env.MQ_HOST = "wetl-main-queue-dev.redis.cache.windows.net"
+            env.MQ_PORT = '6380'
+            env.MQ_DATABASE = '0'
+            env.MQ_CREDS_ID = "wetl-main-queue-dev"
+            env.SF_URL = 'https://we--danbox.cs62.my.salesforce.com'
+            env.SF_CREDS_ID = "pyth_sf_danbox_creds"
+            env.SF_TOKEN_ID = "pyth_sf_danbox_token"
+            env.SF_DOMAIN = 'test'
+            env.SENTRY_DSN = 'https://3d8842518bc74291840d42a501825f26@sentry.io/1404060'
+          } else if (params.target == 'staging') {
+            env.RESOURCE_GROUP = 'weorg-ppd'
+            env.MQ_HOST = "wetl-main-queue-staging.redis.cache.windows.net"
+            env.MQ_PORT = '6380'
+            env.MQ_DATABASE = '0'
+            env.SF_URL = 'https://we--danbox.cs62.my.salesforce.com'
+            env.MQ_CREDS_ID = "wetl-main-queue-staging"
+            env.SF_CREDS_ID = "pyth_sf_danbox_creds"
+            env.SF_TOKEN_ID = "pyth_sf_danbox_token"
+            env.SF_DOMAIN = 'test'
+            env.SENTRY_DSN = 'https://8f96c0cd6fb6454bb1a765a42ed84e16@sentry.io/1419200'
+          } else if (params.target == 'production') {
+            env.RESOURCE_GROUP = 'weorg-vpc-plateng'
+            env.MQ_HOST = "wetl-main-queue.redis.cache.windows.net"
+            env.MQ_PORT = '6380'
+            env.MQ_DATABASE = '0'
+            env.MQ_CREDS_ID = "wetl-main-queue-production"
+            env.SF_URL = ''
+            env.SF_CREDS_ID = "wetl-salesforce-creds"
+            env.SF_TOKEN_ID = "wetl-salesforce-token"
+            env.SF_DOMAIN = ''
+            env.SENTRY_DSN = 'https://84c66da1ca0c42438405ef987d718f45@sentry.io/1419209'
+          }
+        }
+        // make sure the azure-cli container is available
+        sh 'docker pull microsoft/azure-cli'
+      }
+    }
+    stage('Test the container') {
+      agent {
+        docker {
+          image "wetl-core/worker:${params.image_tag}"
+          args '-v $HOME/.jenkins/:/tmp'
+          registryUrl "https://wedockerregistrystaging.azurecr.io"
+          registryCredentialsId 'we-docker-registry-staging'
+        }
+      }
+      steps {
+        sh 'pytest --tb=short --cov=./ tests/ --ignore=./tests/test_worker_concurrency.py'
+      }
+    }
+    stage("Deploy container to chosen deploy") {
+      agent {
+        docker {
+          image 'microsoft/azure-cli'
+          args '-v $HOME/.jenkins/:/tmp'
+        }
+      }
+      environment {
+        MQ_CREDS = credentials("${MQ_CREDS_ID}")
+        SF_CREDS = credentials("${SF_CREDS_ID}")
+        SF_TOKEN = credentials("${SF_TOKEN_ID}")
+      }
+      steps {
+        script {
+          sh """
+          az login \
+            --service-principal \
+            -u http://$JENKINS_SP_NAME \
+            -p \"$JENKINS_SP_PW\" \
+            --verbose \
+            --tenant we.org
+          """
+          sh """
+          az container create  \
+            -g ${RESOURCE_GROUP} \
+            --name ${APP_NAME} \
+            --image ${DOCKER_REGISTRY}/${DOCKER_REPO_NAME}:${params.image_tag} \
+            --registry-username ${DOCKER_REGISTRY_CREDS_USR} \
+            --registry-password "${DOCKER_REGISTRY_CREDS_PSW}" \
+            --ip-address public \
+            --dns-name-label ${DNS_NAME_LABEL} \
+            --environment-variables \
+              'MQ_HOST'=${MQ_HOST} \
+              'MQ_PASSWORD'=${MQ_CREDS} \
+              'MQ_PORT'=${MQ_PORT} \
+              'MQ_DATABASE'=${MQ_DATABASE} \
+              'MQ_BROKER'=${MQ_BROKER} \
+              'SF_URL'=${SF_URL} \
+              'SF_USERNAME'=${SF_CREDS_USR} \
+              'SF_PASSWORD'=${SF_CREDS_PSW} \
+              'SF_TOKEN'=${SF_TOKEN} \
+              'SF_DOMAIN'=${SF_DOMAIN} \
+              'SENTRY_DSN'=${SENTRY_DSN} \
+              'APPINSIGHTS_KEY'=${APPINSIGHTS_KEY} \
+            --verbose \
+          """
+          sh """
+          az container restart \
+            --verbose \
+            -g ${RESOURCE_GROUP} \
+            --name ${APP_NAME}
+          """
+        }
+      }
+    }
+    stage('Run End-to-end tests') {
+      when { expression { params.target != 'production' } }
+      steps {
+        build (
+          job: 'wetl_end_to_end_tests',
+          parameters: [
+            [$class: 'StringParameterValue', name: 'deploy', value: "${params.target}"]
+          ],
+          wait: true,
+          propagate: true
+        )
+      }
+    }
+  }
+
+  post {
+    success {
+      office365ConnectorSend(
+        message: "WETL Core deployed to ${params.target} Successfully",
+        status: "SUCCESS",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "6ef449"
+      )
+    }
+    failure {
+      office365ConnectorSend(
+        message: "Error while building WETL Core",
+        status: "FAILURE",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "d10815"
+      )
+    }
+  }
+}

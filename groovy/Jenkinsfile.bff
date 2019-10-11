@@ -1,0 +1,286 @@
+pipeline {
+  agent any
+
+  parameters {
+    string(
+      name: 'version_tag',
+      description: 'Docker tag of the accounts image to deploy.',
+      defaultValue: ''
+    )
+  }
+
+  environment {
+    CI = 'true'
+    SHOPIFY_MULTIPASS_SECRETS = credentials('SHOPIFY_MULTIPASS_SECRETS')
+
+    DEV_WEBAPP_NAME = 'accounts-bff-dev'
+    DEV_RESOURCE_GROUP = 'weorg-dev'
+    DEV_DOCKER_REGISTRY = 'wedockerregistrydev.azurecr.io'
+    DEV_DOCKER_REGISTRY_CREDS_ID = 'we-docker-registry-dev'
+    DEV_DOCKER_REGISTRY_CREDS = credentials("${DEV_DOCKER_REGISTRY_CREDS_ID}")
+
+    // TODO: make this an actual stg registry
+    STAGING_WEBAPP_NAME = 'accounts-bff-stg'
+    STAGING_RESOURCE_GROUP = 'weorg-ppd'
+    STAGING_DOCKER_REGISTRY = 'wedockerregistrydev.azurecr.io'
+    STAGING_DOCKER_REGISTRY_CREDS_ID = 'we-docker-registry-dev'
+    STAGING_DOCKER_REGISTRY_CREDS = credentials("${STAGING_DOCKER_REGISTRY_CREDS_ID}")
+
+    PRODUCTION_WEBAPP_NAME = 'accounts-production'
+    PRODUCTION_RESOURCE_GROUP = 'weorg-vpc-appeng'
+    PRODUCTION_DOCKER_REGISTRY = 'wedockerregistryprod.azurecr.io'
+    PRODUCTION_DOCKER_REGISTRY_CREDS_ID = 'prod-docker-registry'
+    PRODUCTION_DOCKER_REGISTRY_CREDS = credentials("${PRODUCTION_DOCKER_REGISTRY_CREDS_ID}")
+
+    DOCKER_REPO_NAME='accounts-bff'
+    JENKINS_SP_PW = credentials('jenkins_sp_pw')
+    JENKINS_SP_NAME = 'jenkins_sp'
+    SLOT = "pre-live"
+  }
+
+  stages {
+    stage("Env Vars and Setup") {
+      steps {
+        sh "ls -laht"
+        script {
+          if (BRANCH_NAME == 'develop' || (BRANCH_NAME ==~ /test\/(.*)/)) {
+            env.TARGET = 'dev';
+          } else if (BRANCH_NAME == 'master') {
+            env.TARGET = 'production';
+          } else if (BRANCH_NAME ==~ /(bugfix|release)\/(.*)/) {
+            env.TARGET = 'staging';
+          } else {
+            // no-op
+            env.TARGET = 'none';
+          }
+
+          // Set version_tag if required
+          if (version_tag == '') {
+            escapedBranchName = "${GIT_BRANCH}".replaceAll("/", "-");
+            env.version_tag = "${escapedBranchName}-${GIT_COMMIT}";
+          }
+
+          // Set deploy-specific config
+          if (TARGET == 'dev') {
+            env.WEBAPP_NAME = DEV_WEBAPP_NAME
+            env.RESOURCE_GROUP = DEV_RESOURCE_GROUP
+            env.DOCKER_REGISTRY = DEV_DOCKER_REGISTRY
+            env.DOCKER_REGISTRY_CREDS_ID = DEV_DOCKER_REGISTRY_CREDS_ID
+            env.DOCKER_REGISTRY_CREDS_USR = DEV_DOCKER_REGISTRY_CREDS_USR
+            env.DOCKER_REGISTRY_CREDS_PSW = DEV_DOCKER_REGISTRY_CREDS_PSW
+          } else if (TARGET == 'staging') {
+            env.WEBAPP_NAME = STAGING_WEBAPP_NAME
+            env.RESOURCE_GROUP = STAGING_RESOURCE_GROUP
+            env.DOCKER_REGISTRY = STAGING_DOCKER_REGISTRY
+            env.DOCKER_REGISTRY_CREDS_ID = STAGING_DOCKER_REGISTRY_CREDS_ID
+            env.DOCKER_REGISTRY_CREDS_USR = STAGING_DOCKER_REGISTRY_CREDS_USR
+            env.DOCKER_REGISTRY_CREDS_PSW = STAGING_DOCKER_REGISTRY_CREDS_PSW
+          } else if (TARGET == 'production') {
+            env.WEBAPP_NAME = PRODUCTION_WEBAPP_NAME
+            env.RESOURCE_GROUP = PRODUCTION_RESOURCE_GROUP
+            env.DOCKER_REGISTRY = PRODUCTION_DOCKER_REGISTRY
+            env.DOCKER_REGISTRY_CREDS_ID = PRODUCTION_DOCKER_REGISTRY_CREDS_ID
+            env.DOCKER_REGISTRY_CREDS_USR = PRODUCTION_DOCKER_REGISTRY_CREDS_USR
+            env.DOCKER_REGISTRY_CREDS_PSW = PRODUCTION_DOCKER_REGISTRY_CREDS_PSW
+          }
+          env.DOCKER_REGISTRY_ADDR= "https://${DOCKER_REGISTRY}"
+          sh "printenv"
+        }
+      }
+    }
+
+    stage("Build & Test BFF image") {
+      when {
+        expression {
+          TARGET == 'dev' ||
+          TARGET == 'staging'
+        }
+      }
+      steps {
+        echo "Build and Test image ${version_tag} for ${TARGET}"
+        script {
+          dir("bff") {
+            bffBuildImg = docker.build("accounts-bff", "-f Dockerfile.deploy --build-arg VERSION=${version_tag} .")
+          }
+          bffBuildImg.inside {
+            sh "./bff/jenkins/test.sh"
+            sh "./bff/jenkins/lint.sh ./bff"
+          }
+        }
+      }
+    }
+
+    stage("Push BFF image to Dev or Staging Registry") {
+      when {
+        expression {
+          TARGET == 'dev' ||
+          TARGET == 'staging'
+        }
+      }
+      steps {
+        echo "Push image ${version_tag} to ${TARGET} registry"
+        script {
+          docker.withRegistry("${DOCKER_REGISTRY_ADDR}", "${DOCKER_REGISTRY_CREDS_ID}") {
+            bffBuildImg.push("${version_tag}")
+          }
+        }
+      }
+    }
+
+    stage("Copy image from Staging to Prod registry") {
+      when {
+        expression {
+          TARGET == 'production'
+        }
+      }
+      agent {
+        docker {
+          image 'microsoft/azure-cli'
+          args '-v $HOME/.jenkins/:/tmp'
+        }
+      }
+      steps {
+        echo "Copy image $version_tag from staging to production"
+        sh """
+          az login \
+            --service-principal \
+            -u http://$JENKINS_SP_NAME \
+            -p \"$JENKINS_SP_PW\" \
+            --tenant we.org \
+            --verbose
+        """
+        sh """
+          az acr import \
+            -n $PRODUCTION_DOCKER_REGISTRY \
+            --source $STAGING_DOCKER_REGISTRY/$DOCKER_REPO_NAME:${version_tag}
+        """
+      }
+    }
+
+    stage("Deploy BFF to pre-live slot") {
+      agent {
+        docker {
+          image 'microsoft/azure-cli'
+          args '-v $HOME/.jenkins/:/tmp'
+        }
+      }
+      steps {
+        echo "Deploying image $version_tag for $TARGET to pre-live slot"
+        sh """
+          az login \
+            --service-principal \
+            -u http://$JENKINS_SP_NAME \
+            -p \"$JENKINS_SP_PW\" \
+            --tenant we.org \
+            --verbose
+        """
+        sh """
+          az webapp config container set \
+            --resource-group ${RESOURCE_GROUP} \
+            --name ${WEBAPP_NAME} \
+            --docker-custom-image-name ${DOCKER_REGISTRY}/${DOCKER_REPO_NAME}:${version_tag} \
+            --docker-registry-server-url ${DOCKER_REGISTRY_ADDR} \
+            --docker-registry-server-user ${DOCKER_REGISTRY_CREDS_USR} \
+            --docker-registry-server-password ${DOCKER_REGISTRY_CREDS_PSW} \
+            --slot ${SLOT} \
+            --verbose
+        """
+        // Both restart and start seem to be required, based on whether
+        // the slot is currently started or stopped
+        sh """
+          az webapp restart \
+            --resource-group $RESOURCE_GROUP \
+            --name $WEBAPP_NAME \
+            --slot $SLOT \
+            --verbose
+        """
+        sh """
+          az webapp start \
+            --resource-group $RESOURCE_GROUP \
+            --name $WEBAPP_NAME \
+            --slot $SLOT \
+            --verbose
+        """
+        // Wait 5 min, make sure deployment occurs
+        timeout(5) {
+          waitUntil {
+            script {
+              def r = sh script: '''
+                test "$(curl https://$WEBAPP_NAME-$SLOT.azurewebsites.net/healthcheck --max-time 20)" = "$version_tag"
+              ''', returnStatus: true
+              return (r == 0);
+            }
+          }
+          echo 'Deploy confirmed'
+        }
+      }
+    }
+
+    stage("Swap BFF Slots") {
+      agent {
+        docker {
+          image 'microsoft/azure-cli'
+          args '-v $HOME/.jenkins/:/tmp'
+        }
+      }
+      steps {
+        echo "Swapping slots with image $version_tag for $TARGET"
+        sh """
+          az login \
+            --service-principal \
+            -u http://$JENKINS_SP_NAME \
+            -p \"$JENKINS_SP_PW\" \
+            --verbose \
+            --tenant we.org
+        """
+        sh """
+          az webapp deployment slot swap \
+            --resource-group $RESOURCE_GROUP \
+            --name $WEBAPP_NAME \
+            --slot $SLOT \
+            --verbose
+        """
+        timeout(5) {
+          waitUntil {
+            script {
+              def r = sh script: '''
+                test "$(curl https://$WEBAPP_NAME.azurewebsites.net/healthcheck --max-time 20)" = "$version_tag"
+              ''', returnStatus: true
+              return (r == 0);
+            }
+          }
+        }
+        echo "Taking down pre-live slot"
+        sh """
+          az webapp stop \
+            --resource-group $RESOURCE_GROUP \
+            --name $WEBAPP_NAME \
+            --slot $SLOT \
+            --verbose
+        """
+      }
+    }
+  }
+
+  post {
+    success {
+      office365ConnectorSend(
+        message: "Accounts App BFF launched successfully",
+        status: "SUCCESS",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "6ef449"
+      )
+    }
+    failure {
+      office365ConnectorSend(
+        message: "Error while launching Accounts App BFF",
+        status: "FAILURE",
+        webhookUrl: "$PYTH_TEAMS_WEBHOOK",
+        color: "d10815"
+      )
+    }
+    always {
+      deleteDir()
+    }
+  }
+}
