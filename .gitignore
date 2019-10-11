@@ -1,3 +1,5 @@
+**/**.swp
+
 **/cpp/VulkanTesting/shaders/**.spv
 **/cpp/data_structures/**
 !**/cpp/data_structures/*.*
@@ -13,3 +15,5 @@
 **/elixir/kv_umbrella/_build/**
 
 **/erlang/**.beam
+
+**/haxe/**.hl
