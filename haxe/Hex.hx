@@ -1,7 +1,13 @@
 package;
 
+import h2d.col.Point;
+import h2d.col.Polygon;
+import h2d.col.Matrix;
+import h2d.Object;
+import h2d.Graphics;
 
-class Hexes extends h2d.Graphics {
+
+class Hexes extends Graphics {
 
   public function drawHexes(
     width: Int,
@@ -9,12 +15,14 @@ class Hexes extends h2d.Graphics {
     rows: Int,
     columns: Int,
     ?spacing: Int = 0,
-    ?color: Int = 0xFFFFFF
+    ?baseColor: Int = 0xFFFFFF,
+    ?selectedColor: Int = 0x808080,
+    ?fixed: Bool = true
   ) {
     for (row in 0...rows) {
       for (col in 0...columns) {
-        var hex = new Hex();
-        hex.drawHex(width, height, color);
+        var hex = new Hex(width, height, baseColor, selectedColor, fixed);
+        hex.drawHex();
 
         var dy = row * (height + spacing) + Std.int(height / 2);
         var dx = col * (width + spacing - hex.xOffset);
@@ -22,45 +30,99 @@ class Hexes extends h2d.Graphics {
           dy = row * (height + spacing);
         }
 
-        /*
-        var data = {
-          "row": row,
-          "col": col,
-          "dx": dx,
-          "dy": dy
-        };
-        trace(data);
-        */
-
-        hex.setPosition(dx, dy);
+        hex.updatePosition(dx, dy);
         addChild(hex);
       }
     }
   }
 
-  public function findHex(point: h2d.col.Point): h2d.Object {
+  public function findHexByPoint(point: Point): Null<Hex> {
+    var children = iterator();
+    var c: Null<Hex> = null;
+    for (child in children) {
+      if (!Std.is(child, Hex)) {
+        continue;
+      }
+
+      var bounds = child.getBounds();
+      if (bounds.contains(point)) {
+        c = cast(child, Hex);
+        if (c.collides(point)) {
+          break;
+        } else {
+          c = null;
+        }
+      }
+    }
+    return c;
+  }
+
+  public function unselectAll() {
     var children = iterator();
     for (child in children) {
-      //var bounds = h2d.col.Bounds(child.x, child.y, child.width, child.height);
-      var bounds = child.getBounds();
-      if (bounds.inside(point)) {
-        return child;
+      if (!Std.is(child, Hex)) {
+        continue;
+      }
+
+      var c = cast(child, Hex);
+      if (c.selected) {
+        c.unselect();
+      }
+    }
+  }
+
+  public function update() {
+    var children = iterator();
+    for (child in children) {
+      if (!Std.is(child, Hex)) {
+        continue;
+      }
+
+      var c = cast(child, Hex);
+      if (c.dirty) {
+        c.dirty = false;
+        c.drawHex();
       }
     }
   }
 }
 
 
-class Hex extends h2d.Graphics {
+class Hex extends Graphics {
+  public var width: Int;
+  public var height: Int;
+  public var fixed: Bool;
   public var xOffset: Int;
-  public var bounds: h2d.col.Bounds;
+  public var baseColor: Int;
+  public var selectedColor: Int;
+  public var currentColor: Int;
+  public var dirty: Bool;
+  public var selected: Bool;
+  var collisionPolygon: Polygon;
+  var points: Array<Point>;
 
-  public function drawHex(
+  public function new(
     width: Int,
     height: Int,
-    ?color: Int = 0xFFFFFF,
-    ?fixed: Bool = true
-  ): Void {
+    ?baseColor: Int = 0xFFFFFF,
+    ?selectedColor: Int = 0x808080,
+    ?fixed: Bool = true,
+    ?parent: Object
+  ) {
+    super(parent);
+    this.dirty = false;
+    this.selected = false;
+    this.width = width;
+    this.height = height;
+
+    this.currentColor = baseColor;
+    this.baseColor = baseColor;
+    this.selectedColor = selectedColor;
+
+    this.fixed = fixed;
+  }
+
+  public function drawHex(): Void {
     var halfHeight = height / 2;
 
     if (fixed) {
@@ -70,14 +132,59 @@ class Hex extends h2d.Graphics {
       this.xOffset = Std.int(width / 4);
     }
 
-    beginFill(color);
-    lineTo(0, halfHeight);
-    lineTo(xOffset, 0);
-    lineTo(width - xOffset, 0);
-    lineTo(width, halfHeight);
-    lineTo(width - xOffset, height);
-    lineTo(xOffset, height);
-    lineTo(0, halfHeight);
+    points = new Array<Point>();
+    points.push(new Point(0, halfHeight));
+    points.push(new Point(xOffset, 0));
+    points.push(new Point(width - xOffset, 0));
+    points.push(new Point(width, halfHeight));
+    points.push(new Point(width - xOffset, height));
+    points.push(new Point(xOffset, height));
+    points.push(new Point(0, halfHeight));
+
+    if (collisionPolygon == null) {
+      collisionPolygon = new Polygon(points);
+    }
+
+    beginFill(currentColor);
+    for (point in points) {
+      lineTo(point.x, point.y);
+    }
     endFill();
+  }
+
+  public function select(): Void {
+    if (!selected) {
+      updateColor(selectedColor);
+      selected = true;
+    }
+  }
+
+  public function unselect(): Void {
+    if (selected) {
+      updateColor(baseColor);
+      selected = false;
+    }
+  }
+
+  public function collides(point: Point): Bool {
+    return collisionPolygon.contains(point, true);
+  }
+
+  public function updateColor(color: Int): Void {
+    this.currentColor = color;
+    this.dirty = true;
+  }
+
+  public function updatePosition(x: Float, y: Float): Void {
+    // from Object
+    setPosition(x, y);
+
+    var mat = new Matrix();
+    mat.initTranslate(x, y);
+    collisionPolygon.transform(mat);
+  }
+
+  override public function toString(): String {
+    return 'Hex(w: $width h: $height color: $currentColor x: $x y: $y)';
   }
 }
